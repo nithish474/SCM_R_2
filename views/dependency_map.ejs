@@ -1,0 +1,505 @@
+<%- include('partials/header', { title: 'CodeGuard - Interactive Dependency Map', activePage: 'dependency-map' }) %>
+
+<div class="page-header d-flex justify-between align-center">
+    <div>
+        <div class="breadcrumb">
+            <a href="/">Home</a> &gt; <span>Interactive Dependency Map</span>
+        </div>
+        <h1 class="page-title">Source Dependency Graph (AST Static Map)</h1>
+        <p class="text-muted" style="margin-top: 0.25rem;">
+            Discovers inter-module relationships by parsing Python Abstract Syntax Trees (AST) to model downstream impact propagation.
+        </p>
+    </div>
+    <div class="d-flex gap-sm">
+        <div class="btn-group d-flex" style="background: #f1f5f9; border-radius: var(--radius-md); padding: 2px;">
+            <button class="btn btn-light btn-xs" id="zoomInBtn" onclick="zoomGraph(0.2)" title="Zoom In">+</button>
+            <button class="btn btn-light btn-xs" id="zoomOutBtn" onclick="zoomGraph(-0.2)" title="Zoom Out">&minus;</button>
+            <button class="btn btn-light btn-xs" id="resetZoomBtn" onclick="resetGraphView()" title="Reset Zoom & Selection">⟲ Reset</button>
+        </div>
+        <a href="/dashboard" class="btn btn-outline btn-sm">Back to Dashboard</a>
+    </div>
+</div>
+
+<!-- Graph Controls Toolbar -->
+<div class="card shadow-xs" style="margin-bottom: 1.25rem; padding: 0.85rem 1.25rem;">
+    <div class="d-flex justify-between align-center flex-wrap gap-md">
+        <div class="d-flex align-center gap-md">
+            <div class="search-box">
+                <input type="text" id="nodeSearchInput" class="form-input form-input-sm" placeholder="Search file or module..." oninput="filterGraphNodes(this.value)">
+            </div>
+            <div class="d-flex align-center gap-xs">
+                <span class="text-muted" style="font-size: 0.8rem; font-weight: 500;">Filter:</span>
+                <button class="btn btn-sm btn-outline filter-btn active" data-filter="all" onclick="setGraphFilter('all', this)">All Nodes (<%= dep_map.nodes.length %>)</button>
+                <button class="btn btn-sm btn-outline filter-btn" data-filter="core" onclick="setGraphFilter('core', this)">Core Engine</button>
+                <button class="btn btn-sm btn-outline filter-btn" data-filter="database" onclick="setGraphFilter('database', this)">Database</button>
+                <button class="btn btn-sm btn-outline filter-btn" data-filter="tests" onclick="setGraphFilter('tests', this)">Tests</button>
+            </div>
+        </div>
+
+        <div class="d-flex align-center gap-md" style="font-size: 0.8rem;">
+            <div class="legend-item"><span class="legend-dot" style="background: #3b82f6;"></span> Core Modules</div>
+            <div class="legend-item"><span class="legend-dot" style="background: #10b981;"></span> Database</div>
+            <div class="legend-item"><span class="legend-dot" style="background: #8b5cf6;"></span> Test Suites</div>
+            <div class="legend-item"><span class="legend-dot" style="background: #64748b;"></span> Web & Tools</div>
+            <div class="legend-item"><span class="legend-line" style="border-top: 2px dashed #94a3b8;"></span> Import Edge</div>
+        </div>
+    </div>
+</div>
+
+<!-- Main Visualization Workspace -->
+<div class="dep-map-layout">
+    <!-- Graph Canvas Container -->
+    <div class="card dep-graph-card" id="graphContainer">
+        <div class="graph-canvas-wrapper" id="canvasWrapper">
+            <svg id="depMapSvg" width="100%" height="600" viewBox="0 0 900 600">
+                <defs>
+                    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="22" refY="3" orient="auto">
+                        <polygon points="0 0, 8 3, 0 6" fill="#94a3b8" />
+                    </marker>
+                    <marker id="arrowhead-highlight" markerWidth="8" markerHeight="6" refX="22" refY="3" orient="auto">
+                        <polygon points="0 0, 8 3, 0 6" fill="#2563eb" />
+                    </marker>
+                </defs>
+                <!-- Viewport Group for Pan and Zoom -->
+                <g id="viewportGroup">
+                    <!-- Edges Layer -->
+                    <g id="edgesGroup"></g>
+                    <!-- Nodes Layer -->
+                    <g id="nodesGroup"></g>
+                </g>
+            </svg>
+        </div>
+        <div class="graph-overlay-hint">
+            <span>Drag canvas to pan &bull; Click node to inspect details &bull; Click "Simulate Blast Radius" for impact propagation</span>
+        </div>
+    </div>
+
+    <!-- Node Inspector Sidebar -->
+    <div class="card dep-inspector-card" id="nodeInspectorCard">
+        <div class="card-header">
+            <span class="text-muted" style="font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;">Node Inspector</span>
+            <h3 id="inspectorTitle" style="font-size: 1.05rem; word-break: break-all; margin-top: 0.25rem;">Select a file</h3>
+        </div>
+        <div class="card-body" id="inspectorBody">
+            <div class="empty-state-text text-muted" id="inspectorEmptyState">
+                Click any node in the dependency graph to inspect its AST import connections, blast radius, and related test suites.
+            </div>
+            <div id="inspectorDetails" style="display: none;">
+                <div class="d-flex justify-between align-center">
+                    <div>
+                        <div class="inspector-label">Component Category</div>
+                        <div id="inspectorCategory" class="badge badge-info" style="margin-top: 0.2rem;">Core Module</div>
+                    </div>
+                    <button class="btn btn-primary btn-xs" id="simulateBlastBtn" onclick="runBlastRadiusSimulation()">
+                        🔥 Blast Radius
+                    </button>
+                </div>
+
+                <div id="blastRadiusAlert" class="alert alert-warning" style="display: none; margin-top: 0.75rem; padding: 0.5rem 0.75rem; font-size: 0.78rem;">
+                    <strong>Blast Radius:</strong> <span id="blastCountText">0</span> downstream files impacted. Estimated risk score: <span id="blastRiskScore" class="font-bold">0</span>.
+                </div>
+
+                <div class="inspector-section" style="margin-top: 1rem;">
+                    <div class="inspector-label">Downstream Dependents (Who imports this?)</div>
+                    <p class="text-muted" style="font-size: 0.75rem;">Changes to this file will propagate to:</p>
+                    <ul id="inspectorDependentsList" class="inspector-list" style="margin-top: 0.4rem;"></ul>
+                </div>
+
+                <div class="inspector-section" style="margin-top: 1rem;">
+                    <div class="inspector-label">Upstream Dependencies (What does this import?)</div>
+                    <ul id="inspectorDependenciesList" class="inspector-list" style="margin-top: 0.4rem;"></ul>
+                </div>
+
+                <div class="inspector-section" style="margin-top: 1rem;">
+                    <div class="inspector-label">Target Regression Tests</div>
+                    <ul id="inspectorTestsList" class="inspector-list" style="margin-top: 0.4rem;"></ul>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Graph Data Injected into JS -->
+<script>
+    window.GRAPH_DATA = <%- JSON.stringify(dep_map) %>;
+</script>
+
+<script>
+let currentFilter = 'all';
+let currentZoom = 1;
+let panX = 0, panY = 0;
+let isPanning = false;
+let startX = 0, startY = 0;
+let activeSelectedNode = null;
+
+function updateGraphTransform() {
+    const vp = document.getElementById('viewportGroup');
+    if (vp) {
+        vp.setAttribute('transform', `translate(${panX}, ${panY}) scale(${currentZoom})`);
+    }
+}
+
+function zoomGraph(delta) {
+    currentZoom = Math.min(Math.max(0.5, currentZoom + delta), 2.5);
+    updateGraphTransform();
+}
+
+function initPanControls() {
+    const svg = document.getElementById('depMapSvg');
+    if (!svg) return;
+
+    svg.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.dep-node')) return; // let node click handle
+        isPanning = true;
+        startX = e.clientX - panX;
+        startY = e.clientY - panY;
+        svg.style.cursor = 'grabbing';
+    });
+
+    window.addEventListener('mousemove', (e) => {
+        if (!isPanning) return;
+        panX = e.clientX - startX;
+        panY = e.clientY - startY;
+        updateGraphTransform();
+    });
+
+    window.addEventListener('mouseup', () => {
+        if (isPanning) {
+            isPanning = false;
+            svg.style.cursor = 'default';
+        }
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    renderDependencyGraph(window.GRAPH_DATA);
+    initPanControls();
+});
+
+function getNodeCategory(path) {
+    if (path.startsWith('core/')) return 'core';
+    if (path.startsWith('database/')) return 'database';
+    if (path.startsWith('tests/')) return 'tests';
+    return 'other';
+}
+
+function getNodeColor(category) {
+    switch (category) {
+        case 'core': return '#3b82f6';
+        case 'database': return '#10b981';
+        case 'tests': return '#8b5cf6';
+        default: return '#64748b';
+    }
+}
+
+function renderDependencyGraph(data) {
+    const svg = document.getElementById('depMapSvg');
+    const edgesGroup = document.getElementById('edgesGroup');
+    const nodesGroup = document.getElementById('nodesGroup');
+    if (!svg || !data || !data.nodes) return;
+
+    edgesGroup.innerHTML = '';
+    nodesGroup.innerHTML = '';
+
+    const nodes = data.nodes;
+    const edges = data.edges || [];
+
+    // Layout positions around canvas
+    const width = 900;
+    const height = 600;
+    const radius = Math.min(width, height) * 0.38;
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    const nodePositions = {};
+    
+    // Categorize nodes for clustering
+    const categories = { 'core': [], 'database': [], 'tests': [], 'other': [] };
+    nodes.forEach(n => {
+        const cat = getNodeCategory(n);
+        categories[cat].push(n);
+    });
+
+    // Arrange in aesthetic layers
+    let angleIndex = 0;
+    const totalNodes = nodes.length;
+    nodes.forEach((node, i) => {
+        const cat = getNodeCategory(node);
+        let x, y;
+        if (cat === 'core') {
+            const angle = (angleIndex / (categories.core.length || 1)) * Math.PI * 2;
+            x = centerX + Math.cos(angle) * (radius * 0.45);
+            y = centerY + Math.sin(angle) * (radius * 0.45);
+            angleIndex++;
+        } else if (cat === 'database') {
+            const idx = categories.database.indexOf(node);
+            x = centerX - radius * 0.75 + (idx * 160);
+            y = centerY + radius * 0.6;
+        } else if (cat === 'tests') {
+            const idx = categories.tests.indexOf(node);
+            x = centerX + radius * 0.75;
+            y = centerY - radius * 0.5 + (idx * 90);
+        } else {
+            const idx = categories.other.indexOf(node);
+            x = centerX - radius * 0.75;
+            y = centerY - radius * 0.5 + (idx * 80);
+        }
+        nodePositions[node] = { x: Math.round(x), y: Math.round(y), category: cat };
+    });
+
+    // Render Edges
+    edges.forEach((edge, idx) => {
+        const sourcePos = nodePositions[edge.source];
+        const targetPos = nodePositions[edge.target];
+        if (!sourcePos || !targetPos) return;
+
+        const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const dx = targetPos.x - sourcePos.x;
+        const dy = targetPos.y - sourcePos.y;
+        const cx = (sourcePos.x + targetPos.x) / 2 - dy * 0.1;
+        const cy = (sourcePos.y + targetPos.y) / 2 + dx * 0.1;
+
+        pathEl.setAttribute('d', `M ${sourcePos.x} ${sourcePos.y} Q ${cx} ${cy} ${targetPos.x} ${targetPos.y}`);
+        pathEl.setAttribute('stroke', '#cbd5e1');
+        pathEl.setAttribute('stroke-width', '1.5');
+        pathEl.setAttribute('fill', 'none');
+        pathEl.setAttribute('marker-end', 'url(#arrowhead)');
+        pathEl.setAttribute('class', 'dep-edge');
+        pathEl.setAttribute('id', `edge-${idx}`);
+        pathEl.dataset.source = edge.source;
+        pathEl.dataset.target = edge.target;
+        edgesGroup.appendChild(pathEl);
+    });
+
+    // Render Nodes
+    nodes.forEach(node => {
+        const pos = nodePositions[node];
+        if (!pos) return;
+
+        const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        g.setAttribute('class', `dep-node dep-node-${pos.category}`);
+        g.setAttribute('id', `node-${node.replace(/[^a-zA-Z0-9]/g, '_')}`);
+        g.dataset.nodeId = node;
+        g.dataset.category = pos.category;
+
+        // Circle
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', pos.x);
+        circle.setAttribute('cy', pos.y);
+        circle.setAttribute('r', 16);
+        circle.setAttribute('fill', getNodeColor(pos.category));
+        circle.setAttribute('stroke', '#ffffff');
+        circle.setAttribute('stroke-width', '2.5');
+        circle.setAttribute('style', 'cursor: pointer; transition: all 0.2s;');
+
+        // Label
+        const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('x', pos.x);
+        text.setAttribute('y', pos.y + 28);
+        text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('fill', '#1e293b');
+        text.setAttribute('font-size', '11');
+        text.setAttribute('font-weight', '500');
+        text.textContent = node.split('/').pop();
+
+        g.appendChild(circle);
+        g.appendChild(text);
+
+        g.addEventListener('click', () => selectNode(node, data));
+        nodesGroup.appendChild(g);
+    });
+}
+
+function selectNode(nodeId, data) {
+    activeSelectedNode = nodeId;
+    document.getElementById('blastRadiusAlert').style.display = 'none';
+
+    // Highlight node
+    document.querySelectorAll('.dep-node circle').forEach(c => c.setAttribute('stroke', '#ffffff'));
+    const selectedGroup = document.getElementById(`node-${nodeId.replace(/[^a-zA-Z0-9]/g, '_')}`);
+    if (selectedGroup) {
+        selectedGroup.querySelector('circle').setAttribute('stroke', '#0f172a');
+        selectedGroup.querySelector('circle').setAttribute('stroke-width', '4');
+    }
+
+    // Highlight inbound & outbound edges
+    const edges = data.edges || [];
+    document.querySelectorAll('.dep-edge').forEach(edgeEl => {
+        const isSource = edgeEl.dataset.source === nodeId;
+        const isTarget = edgeEl.dataset.target === nodeId;
+        if (isSource || isTarget) {
+            edgeEl.setAttribute('stroke', isSource ? '#2563eb' : '#10b981');
+            edgeEl.setAttribute('stroke-width', '2.5');
+            edgeEl.setAttribute('marker-end', 'url(#arrowhead-highlight)');
+        } else {
+            edgeEl.setAttribute('stroke', '#e2e8f0');
+            edgeEl.setAttribute('stroke-width', '1');
+            edgeEl.setAttribute('marker-end', 'url(#arrowhead)');
+        }
+    });
+
+    // Populate Inspector
+    document.getElementById('inspectorEmptyState').style.display = 'none';
+    document.getElementById('inspectorDetails').style.display = 'block';
+    document.getElementById('inspectorTitle').textContent = nodeId;
+
+    const cat = getNodeCategory(nodeId);
+    const catEl = document.getElementById('inspectorCategory');
+    catEl.textContent = cat.toUpperCase() + ' MODULE';
+    catEl.className = 'badge ' + (cat === 'core' ? 'badge-primary' : cat === 'database' ? 'badge-low' : cat === 'tests' ? 'badge-info' : 'badge-secondary');
+
+    // Dependents (who imports nodeId)
+    const dependents = edges.filter(e => e.target === nodeId).map(e => e.source);
+    const depList = document.getElementById('inspectorDependentsList');
+    depList.innerHTML = dependents.length > 0
+        ? dependents.map(d => `<li><span class="dep-bullet text-primary">&bull;</span> <code>${d}</code></li>`).join('')
+        : '<li class="text-muted" style="font-size: 0.75rem;">No downstream dependents (leaf node)</li>';
+
+    // Dependencies (who nodeId imports)
+    const dependencies = edges.filter(e => e.source === nodeId).map(e => e.target);
+    const subList = document.getElementById('inspectorDependenciesList');
+    subList.innerHTML = dependencies.length > 0
+        ? dependencies.map(d => `<li><span class="dep-bullet text-success">&bull;</span> <code>${d}</code></li>`).join('')
+        : '<li class="text-muted" style="font-size: 0.75rem;">Standard library / self-contained</li>';
+
+    // Tests
+    const testsList = document.getElementById('inspectorTestsList');
+    const relatedTests = data.nodes.filter(n => n.startsWith('tests/') && (dependents.includes(n) || n.includes('core')));
+    testsList.innerHTML = relatedTests.length > 0
+        ? relatedTests.map(t => `<li><span class="dep-bullet text-info">&bull;</span> <code>${t}</code></li>`).join('')
+        : '<li><code>tests/test_core.py</code> (Baseline suite)</li>';
+}
+
+function runBlastRadiusSimulation() {
+    if (!activeSelectedNode || !window.GRAPH_DATA) return;
+    const edges = window.GRAPH_DATA.edges || [];
+
+    // Forward BFS: Find all downstream dependents (who imports the changed module)
+    const directDependents = edges.filter(e => e.target === activeSelectedNode).map(e => e.source);
+    const transitiveDependents = [];
+
+    directDependents.forEach(d => {
+        const downstream = edges.filter(e => e.target === d).map(e => e.source);
+        downstream.forEach(subD => {
+            if (subD !== activeSelectedNode && !directDependents.includes(subD) && !transitiveDependents.includes(subD)) {
+                transitiveDependents.push(subD);
+            }
+        });
+    });
+
+    const totalImpacted = directDependents.length + transitiveDependents.length;
+    // Risk formula contribution: (Direct * 2) + (Transitive * 1)
+    const estimatedRisk = (directDependents.length * 2) + (transitiveDependents.length * 1) + 2;
+
+    // Highlight nodes visually
+    document.querySelectorAll('.dep-node circle').forEach(c => {
+        c.setAttribute('stroke', '#ffffff');
+        c.setAttribute('stroke-width', '2.5');
+    });
+
+    // Origin node
+    const originEl = document.getElementById(`node-${activeSelectedNode.replace(/[^a-zA-Z0-9]/g, '_')}`);
+    if (originEl) {
+        originEl.querySelector('circle').setAttribute('stroke', '#ef4444');
+        originEl.querySelector('circle').setAttribute('stroke-width', '5');
+    }
+
+    // Direct dependents (orange)
+    directDependents.forEach(d => {
+        const el = document.getElementById(`node-${d.replace(/[^a-zA-Z0-9]/g, '_')}`);
+        if (el) {
+            el.querySelector('circle').setAttribute('stroke', '#f97316');
+            el.querySelector('circle').setAttribute('stroke-width', '4');
+        }
+    });
+
+    // Transitive dependents (amber)
+    transitiveDependents.forEach(t => {
+        const el = document.getElementById(`node-${t.replace(/[^a-zA-Z0-9]/g, '_')}`);
+        if (el) {
+            el.querySelector('circle').setAttribute('stroke', '#eab308');
+            el.querySelector('circle').setAttribute('stroke-width', '3');
+        }
+    });
+
+    // Highlight edges involved
+    document.querySelectorAll('.dep-edge').forEach(edgeEl => {
+        const src = edgeEl.dataset.source;
+        const tgt = edgeEl.dataset.target;
+        if (tgt === activeSelectedNode || (directDependents.includes(tgt) && transitiveDependents.includes(src))) {
+            edgeEl.setAttribute('stroke', '#ef4444');
+            edgeEl.setAttribute('stroke-width', '2.5');
+        } else {
+            edgeEl.setAttribute('stroke', '#f1f5f9');
+            edgeEl.setAttribute('stroke-width', '0.75');
+        }
+    });
+
+    // Update alert box
+    const alertBox = document.getElementById('blastRadiusAlert');
+    if (alertBox) {
+        alertBox.style.display = 'block';
+        document.getElementById('blastCountText').textContent = totalImpacted + ' (' + directDependents.length + ' direct, ' + transitiveDependents.length + ' transitive)';
+        document.getElementById('blastRiskScore').textContent = estimatedRisk.toFixed(1) + ' pts';
+    }
+
+    if (typeof showToast === 'function') {
+        showToast('Blast Radius Computed', `Found ${totalImpacted} downstream impacted modules from ${activeSelectedNode.split('/').pop()}`, 'warning');
+    }
+}
+
+function filterGraphNodes(query) {
+    const q = query.toLowerCase().trim();
+    document.querySelectorAll('.dep-node').forEach(nodeEl => {
+        const nodeId = nodeEl.dataset.nodeId.toLowerCase();
+        if (!q || nodeId.includes(q)) {
+            nodeEl.style.opacity = '1';
+        } else {
+            nodeEl.style.opacity = '0.15';
+        }
+    });
+}
+
+function setGraphFilter(filterType, btnEl) {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btnEl.classList.add('active');
+    currentFilter = filterType;
+
+    document.querySelectorAll('.dep-node').forEach(nodeEl => {
+        const cat = nodeEl.dataset.category;
+        if (filterType === 'all' || cat === filterType) {
+            nodeEl.style.opacity = '1';
+        } else {
+            nodeEl.style.opacity = '0.15';
+        }
+    });
+}
+
+function resetGraphView() {
+    currentZoom = 1;
+    panX = 0;
+    panY = 0;
+    updateGraphTransform();
+    activeSelectedNode = null;
+
+    document.getElementById('nodeSearchInput').value = '';
+    filterGraphNodes('');
+    setGraphFilter('all', document.querySelector('.filter-btn[data-filter="all"]'));
+    document.querySelectorAll('.dep-edge').forEach(edgeEl => {
+        edgeEl.setAttribute('stroke', '#cbd5e1');
+        edgeEl.setAttribute('stroke-width', '1.5');
+        edgeEl.setAttribute('marker-end', 'url(#arrowhead)');
+    });
+    document.querySelectorAll('.dep-node circle').forEach(c => {
+        c.setAttribute('stroke', '#ffffff');
+        c.setAttribute('stroke-width', '2.5');
+    });
+    document.getElementById('inspectorEmptyState').style.display = 'block';
+    document.getElementById('inspectorDetails').style.display = 'none';
+    document.getElementById('inspectorTitle').textContent = 'Select a file';
+    const alertBox = document.getElementById('blastRadiusAlert');
+    if (alertBox) alertBox.style.display = 'none';
+}
+</script>
+
+<%- include('partials/footer') %>
